@@ -62,8 +62,6 @@ Lista los modelos instalados en Ollama, elegís uno por número, lo precarga, y 
 
 ![Chat web con gemma3:1b respondiendo en español](./Captura%20de%20pantalla_20260819_152707.png)
 
-![Conversación más larga en el chat web](./Captura%20de%20pantalla_20260819_153634.png)
-
 **Cómo funciona:**
 - `index.html` es una página estática (sin build, sin dependencias) que habla directo con la API de Ollama en `http://localhost:11434` (`GET /api/tags` para listar modelos, `POST /api/chat` con `stream: true` para el streaming de la respuesta).
 - Un heartbeat (`HEAD /` cada 3s contra el servidor de la propia página) hace que el chat se deshabilite solo si el servidor se apaga.
