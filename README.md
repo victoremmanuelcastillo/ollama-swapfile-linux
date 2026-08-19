@@ -53,18 +53,11 @@ Las capturas de este repo son de una prueba real: correr `smtek/Qwen3.8-27B:Q4_K
 - `findmnt -no FSTYPE /` → si es **btrfs**, un swapfile creado a mano (`fallocate` + `mkswap`) puede fallar o corromperse por copy-on-write/compresión del filesystem.
 - `btrfs --version` (≥ 5.15 aprox.) trae `btrfs filesystem mkswapfile`, que crea el archivo ya con los atributos correctos para ser swap en btrfs. Usar siempre esto en vez del método clásico si tu filesystem es btrfs.
 
-**3. Crear el swapfile** (con sudo):
+**3. Crear el swapfile** — script incluido en este repo, `crear-swapfile-ollama.sh` (correr con sudo):
 ```bash
-SWAPFILE=/swapfile_ollama
-SIZE=32G
-
-btrfs filesystem mkswapfile --size "$SIZE" "$SWAPFILE"   # btrfs-safe
-swapon "$SWAPFILE"
-
-# persistencia tras reinicio, prioridad baja para que el kernel
-# prefiera zram (más rápido) antes de tocar disco:
-echo "$SWAPFILE none swap sw,pri=10 0 0" >> /etc/fstab
+sudo bash crear-swapfile-ollama.sh
 ```
+Hace, en orden: `btrfs filesystem mkswapfile --size 32G /swapfile_ollama` (btrfs-safe), `swapon` para activarlo, y lo agrega a `/etc/fstab` con prioridad baja (`pri=10`) para que el kernel prefiera zram (más rápido) antes de tocar disco.
 
 **4. Bajar y correr el modelo**, ya con espacio suficiente para paginar:
 ```bash
