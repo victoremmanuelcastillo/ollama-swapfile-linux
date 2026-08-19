@@ -1,70 +1,76 @@
-# Ollama Chat
+# Correr modelos de Ollama más grandes que tu RAM (Linux)
 
-Chat web mínimo para hablar con modelos locales de [Ollama](https://ollama.com) desde el navegador, sin dependencias ni build.
+Script para Linux que agrega swap real en disco (btrfs-safe) para poder cargar en [Ollama](https://ollama.com) modelos que no entran en la RAM física de la máquina — sin comprar hardware nuevo. Probado corriendo un modelo de 18GB en una laptop con 7.6GB de RAM y sin GPU dedicada.
 
-## Requisitos
+Como extra, el repo incluye un chat web mínimo para probar los modelos una vez cargados — es lo secundario, más abajo.
 
-- [Ollama](https://ollama.com) instalado y corriendo (`ollama serve`, o el servicio de systemd).
-- Al menos un modelo bajado (`ollama pull <modelo>`).
-- Python 3 (solo para servir el HTML estático).
+## Lo principal: `crear-swapfile-ollama.sh`
 
-## Uso
+```bash
+sudo bash crear-swapfile-ollama.sh
+```
+
+Qué hace, en orden:
+
+1. `btrfs filesystem mkswapfile --size 32G /swapfile_ollama` — crea un archivo de 32GB ya formateado como swap, de forma segura para btrfs (ver por qué abajo).
+2. `swapon /swapfile_ollama` — lo activa.
+3. Lo agrega a `/etc/fstab` con prioridad baja (`pri=10`), para que el kernel prefiera usar zram (RAM comprimida, más rápido) antes de tocar disco, y para que el swap persista tras reiniciar.
+
+Editá las variables `SWAPFILE` y `SIZE` al principio del script si querés otra ruta o tamaño.
+
+**Requisitos:** Linux con `btrfs-progs` (para el subcomando `mkswapfile`) y systemd. Pensado y probado en un filesystem **btrfs** — en `ext4` el paso 1 cambia (`fallocate` + `mkswap` clásico sirve ahí sin problema, btrfs es el caso que necesita cuidado especial).
+
+### Por qué no alcanza con `fallocate` + `mkswap` en btrfs
+
+Un swapfile común puede fallar o corromperse en btrfs porque el filesystem le aplica copy-on-write y compresión por defecto, cosas incompatibles con un archivo de swap. `btrfs filesystem mkswapfile` (btrfs-progs ≥ 5.15 aprox.) crea el archivo ya con los atributos correctos. Si tu filesystem es btrfs, usá siempre esto en vez del método clásico.
+
+## La prueba real: Qwen3.8-27B (18GB) en una laptop con 7.6GB de RAM
+
+Hardware: laptop Linux, CPU Intel de 4 núcleos, GPU integrada (sin VRAM dedicada), 7.6GB RAM física, disco NVMe con filesystem btrfs.
+
+**1. Diagnóstico de por qué no entraba tal cual:**
+- `free -h` → RAM insuficiente para los 18GB del modelo.
+- `lspci | grep -i vga` → GPU integrada, sin VRAM propia, descarta acelerar por GPU.
+- `swapon --show` → solo había `zram` (swap comprimido *dentro de la misma RAM*, no agrega capacidad real para datos poco compresibles como pesos de un modelo).
+- Conclusión: hacía falta swap real en disco.
+
+**2. Crear el swap** con el script de arriba: pasó de 7.6GB de swap (solo zram) a **~39GB** (7.6GB zram + 32GB disco).
+
+**3. Bajar y correr el modelo**, ya con espacio suficiente para paginar:
+```bash
+ollama pull smtek/Qwen3.8-27B:Q4_K_XL
+ollama run smtek/Qwen3.8-27B:Q4_K_XL
+```
+
+**4. Resultado real:**
+
+![Prueba de Qwen3.8-27B respondiendo "hola" en el chat web](./Captura%20de%20pantalla_20260819_151956.png)
+
+Cargó y respondió, pero muy lento — ese "hola" tardó **~52 minutos** en total (0.15-0.32 tokens/seg). Con `vmstat 1` se confirma que el cuello de botella es I/O de disco (`wa` 40-48%, swap in/out de 130-190 MB/s constante), **no CPU** — el procesador pasa la mayoría del tiempo esperando páginas del modelo desde el NVMe, por eso ni se nota carga térmica real (el ventilador no sube).
+
+Sirve para probar modelos grandes sin comprar hardware, pero no para uso interactivo — es demasiado lento. Con RAM suficiente (sin swap) el mismo modelo debería andar en el orden de 1-3 tokens/seg en un CPU modesto, y muchísimo más rápido con GPU/VRAM suficiente.
+
+## Extra (opcional): chat web para probar los modelos
+
+Esto es secundario — una forma cómoda de probar lo de arriba desde el navegador, no el punto central del repo.
 
 ```bash
 ./iniciar-chat.sh
 ```
 
-El script:
+Lista los modelos instalados en Ollama, elegís uno por número, lo precarga, y levanta un chat en `http://localhost:8080` con ese modelo ya seleccionado:
 
-1. Lista los modelos que ya tenés instalados en Ollama y te deja elegir uno por número.
-2. Precarga ese modelo en Ollama.
-3. Levanta el chat en `http://localhost:8080` con el modelo ya seleccionado.
+![Chat web con gemma3:1b respondiendo en español](./Captura%20de%20pantalla_20260819_152707.png)
 
-Con **Ctrl+C** en la terminal (o cerrando la terminal) se apaga el servidor y se descarga el modelo de memoria. La página del chat también detecta cuando el servidor se apaga y se deshabilita sola, para que no quede nada corriendo en segundo plano sin que te des cuenta.
+![Conversación más larga en el chat web](./Captura%20de%20pantalla_20260819_153634.png)
 
-## Cómo funciona
+**Cómo funciona:**
+- `index.html` es una página estática (sin build, sin dependencias) que habla directo con la API de Ollama en `http://localhost:11434` (`GET /api/tags` para listar modelos, `POST /api/chat` con `stream: true` para el streaming de la respuesta).
+- Un heartbeat (`HEAD /` cada 3s contra el servidor de la propia página) hace que el chat se deshabilite solo si el servidor se apaga.
+- `iniciar-chat.sh` levanta `python3 -m http.server` en el puerto 8080 y precarga el modelo elegido con `keep_alive` largo. Un `trap` sobre `INT TERM HUP EXIT` limpia todo (mata el servidor, hace `ollama stop <modelo>`) sea que cierres con Ctrl+C, cierres la terminal, o el script termine por cualquier otra razón — no queda nada corriendo en segundo plano.
 
-- **`index.html`** es una página estática (sin build, sin dependencias) que habla directo con la API de Ollama en `http://localhost:11434`:
-  - `GET /api/tags` para listar los modelos instalados y llenar el `<select>`.
-  - `POST /api/chat` con `stream: true` para mandar el mensaje y leer la respuesta token por token (el `body` es un `ReadableStream` que se va parseando línea por línea como JSON).
-  - Un `setInterval` cada 3s hace un `HEAD /` contra el servidor que sirve la propia página (heartbeat). Si ese fetch falla (porque el servidor se apagó), la página se deshabilita sola.
-  - El modelo a preseleccionar se pasa por query string (`?model=...`) y se lee con `URLSearchParams`.
+## Requisitos generales
 
-- **`iniciar-chat.sh`**:
-  1. Corre `ollama list`, parsea los nombres de modelo y arma un menú numerado.
-  2. Con la elección, dispara un `POST /api/generate` con `prompt` vacío y `keep_alive` largo — esto hace que Ollama cargue el modelo en memoria de una, en vez de esperar al primer mensaje real.
-  3. Levanta `python3 -m http.server` en el puerto 8080 (matando cualquier proceso previo en ese puerto con `fuser -k`) y guarda su PID.
-  4. Imprime la URL del chat con el modelo ya en la query string.
-  5. Queda en `wait` sobre el proceso del servidor. Un `trap` sobre `INT TERM HUP EXIT` corre una función de limpieza (con guarda para no duplicarse) que mata el servidor y hace `ollama stop <modelo>` — así, sea que apretés Ctrl+C, cierres la terminal, o el script termine por cualquier otra razón, no queda nada corriendo en segundo plano.
-
-Servidor web (8080) y motor de inferencia (Ollama, puerto 11434) son procesos separados: el primero solo sirve el HTML/JS una vez; después de eso el navegador habla directo con Ollama. Por eso el heartbeat en el frontend es necesario — sin él, cerrar la terminal no alcanza para cortar una pestaña que ya cargó la página.
-
-## Cómo correr un modelo más grande que tu RAM (ej. 18GB en 7.6GB de RAM)
-
-Las capturas de este repo son de una prueba real: correr `smtek/Qwen3.8-27B:Q4_K_XL` (18GB) en una laptop con solo 7.6GB de RAM y sin GPU dedicada (Intel Iris integrada). Así se hizo:
-
-**1. Diagnóstico:**
-- `free -h` → RAM insuficiente para el modelo.
-- `lspci | grep -i vga` → GPU integrada, sin VRAM propia, descarta acelerar por GPU.
-- `swapon --show` → si solo hay `zram`, no alcanza: es swap *comprimido en la misma RAM*, no agrega capacidad real para datos poco compresibles como pesos de un modelo.
-- Conclusión: hace falta swap real en disco.
-
-**2. Filesystem del disco** (importante si usás btrfs):
-- `findmnt -no FSTYPE /` → si es **btrfs**, un swapfile creado a mano (`fallocate` + `mkswap`) puede fallar o corromperse por copy-on-write/compresión del filesystem.
-- `btrfs --version` (≥ 5.15 aprox.) trae `btrfs filesystem mkswapfile`, que crea el archivo ya con los atributos correctos para ser swap en btrfs. Usar siempre esto en vez del método clásico si tu filesystem es btrfs.
-
-**3. Crear el swapfile** — script incluido en este repo, `crear-swapfile-ollama.sh` (correr con sudo):
-```bash
-sudo bash crear-swapfile-ollama.sh
-```
-Hace, en orden: `btrfs filesystem mkswapfile --size 32G /swapfile_ollama` (btrfs-safe), `swapon` para activarlo, y lo agrega a `/etc/fstab` con prioridad baja (`pri=10`) para que el kernel prefiera zram (más rápido) antes de tocar disco.
-
-**4. Bajar y correr el modelo**, ya con espacio suficiente para paginar:
-```bash
-ollama pull smtek/Qwen3.8-27B:Q4_K_XL
-./iniciar-chat.sh   # elegís el modelo del menú
-```
-
-**5. Resultado real:** cargó y respondió, pero muy lento — un simple "hola" tardó **~52 minutos** en total (0.15-0.32 tokens/seg). Con `vmstat 1` se confirma que el cuello de botella es I/O de disco (`wa` 40-48%, swap in/out de 130-190 MB/s constante), **no CPU** — el procesador pasa la mayoría del tiempo esperando páginas del modelo desde el NVMe, por eso ni se nota carga térmica real (el ventilador no sube).
-
-Sirve para probar modelos grandes sin comprar hardware, pero no para uso interactivo — es demasiado lento. Con suficiente RAM (sin swap) el mismo modelo debería andar en el orden de 1-3 tokens/seg en un CPU modesto, y muchísimo más rápido con GPU/VRAM suficiente.
+- Linux (probado en una distro basada en Arch, con systemd y btrfs).
+- [Ollama](https://ollama.com) instalado.
+- Python 3 (solo si usás el chat web).
