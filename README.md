@@ -39,6 +39,39 @@ Con **Ctrl+C** en la terminal (o cerrando la terminal) se apaga el servidor y se
 
 Servidor web (8080) y motor de inferencia (Ollama, puerto 11434) son procesos separados: el primero solo sirve el HTML/JS una vez; después de eso el navegador habla directo con Ollama. Por eso el heartbeat en el frontend es necesario — sin él, cerrar la terminal no alcanza para cortar una pestaña que ya cargó la página.
 
-## Notas
+## Cómo correr un modelo más grande que tu RAM (ej. 18GB en 7.6GB de RAM)
 
-Corriendo un modelo grande (ej. un 27B cuantizado) en una máquina sin suficiente RAM/VRAM, la respuesta puede tardar minutos — el cuello de botella pasa a ser el disco (swap), no el CPU. Las capturas en este repo son de esa prueba.
+Las capturas de este repo son de una prueba real: correr `smtek/Qwen3.8-27B:Q4_K_XL` (18GB) en una laptop con solo 7.6GB de RAM y sin GPU dedicada (Intel Iris integrada). Así se hizo:
+
+**1. Diagnóstico:**
+- `free -h` → RAM insuficiente para el modelo.
+- `lspci | grep -i vga` → GPU integrada, sin VRAM propia, descarta acelerar por GPU.
+- `swapon --show` → si solo hay `zram`, no alcanza: es swap *comprimido en la misma RAM*, no agrega capacidad real para datos poco compresibles como pesos de un modelo.
+- Conclusión: hace falta swap real en disco.
+
+**2. Filesystem del disco** (importante si usás btrfs):
+- `findmnt -no FSTYPE /` → si es **btrfs**, un swapfile creado a mano (`fallocate` + `mkswap`) puede fallar o corromperse por copy-on-write/compresión del filesystem.
+- `btrfs --version` (≥ 5.15 aprox.) trae `btrfs filesystem mkswapfile`, que crea el archivo ya con los atributos correctos para ser swap en btrfs. Usar siempre esto en vez del método clásico si tu filesystem es btrfs.
+
+**3. Crear el swapfile** (con sudo):
+```bash
+SWAPFILE=/swapfile_ollama
+SIZE=32G
+
+btrfs filesystem mkswapfile --size "$SIZE" "$SWAPFILE"   # btrfs-safe
+swapon "$SWAPFILE"
+
+# persistencia tras reinicio, prioridad baja para que el kernel
+# prefiera zram (más rápido) antes de tocar disco:
+echo "$SWAPFILE none swap sw,pri=10 0 0" >> /etc/fstab
+```
+
+**4. Bajar y correr el modelo**, ya con espacio suficiente para paginar:
+```bash
+ollama pull smtek/Qwen3.8-27B:Q4_K_XL
+./iniciar-chat.sh   # elegís el modelo del menú
+```
+
+**5. Resultado real:** cargó y respondió, pero muy lento — un simple "hola" tardó **~52 minutos** en total (0.15-0.32 tokens/seg). Con `vmstat 1` se confirma que el cuello de botella es I/O de disco (`wa` 40-48%, swap in/out de 130-190 MB/s constante), **no CPU** — el procesador pasa la mayoría del tiempo esperando páginas del modelo desde el NVMe, por eso ni se nota carga térmica real (el ventilador no sube).
+
+Sirve para probar modelos grandes sin comprar hardware, pero no para uso interactivo — es demasiado lento. Con suficiente RAM (sin swap) el mismo modelo debería andar en el orden de 1-3 tokens/seg en un CPU modesto, y muchísimo más rápido con GPU/VRAM suficiente.
